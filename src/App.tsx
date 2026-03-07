@@ -64,21 +64,25 @@ export default function App() {
   });
 
   const calculateStats = (data: Collection[]): Stats => {
-    const totalPaid = data.reduce((sum, c) => sum + c.paid_amount, 0);
-    const totalTarget = data.reduce((sum, c) => sum + c.amount, 0);
-    const totalUnpaid = totalTarget - totalPaid;
+    const totalPaid = data.reduce((sum, c) => sum + (Number(c.paid_amount) || 0), 0);
+    const totalTarget = data.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
+    const totalUnpaid = Math.max(0, totalTarget - totalPaid);
     
     const countTotal = data.length;
-    const countCollected = data.filter(c => c.paid_amount > 0).length;
+    const countCollected = data.filter(c => (Number(c.paid_amount) || 0) > 0).length;
     const countPending = data.filter(c => c.status !== 'paid').length;
 
     const placeMap = new Map<string, { total: number, paid: number, unpaid: number }>();
     data.forEach(c => {
-      const current = placeMap.get(c.place) || { total: 0, paid: 0, unpaid: 0 };
-      current.total += c.amount;
-      current.paid += c.paid_amount;
-      current.unpaid += (c.amount - c.paid_amount);
-      placeMap.set(c.place, current);
+      const placeName = c.place || 'Unknown';
+      const current = placeMap.get(placeName) || { total: 0, paid: 0, unpaid: 0 };
+      const amt = Number(c.amount) || 0;
+      const paid = Number(c.paid_amount) || 0;
+      
+      current.total += amt;
+      current.paid += paid;
+      current.unpaid += Math.max(0, amt - paid);
+      placeMap.set(placeName, current);
     });
 
     const placeStats = Array.from(placeMap.entries()).map(([place, stats]) => ({
@@ -87,13 +91,14 @@ export default function App() {
     })).sort((a, b) => b.paid - a.paid);
 
     const leaderboard = [...data]
-      .sort((a, b) => b.paid_amount - a.paid_amount)
+      .filter(c => (Number(c.paid_amount) || 0) > 0) // Only show people who have actually paid something
+      .sort((a, b) => (Number(b.paid_amount) || 0) - (Number(a.paid_amount) || 0))
       .slice(0, 10)
       .map(c => ({
         name: c.name,
         place: c.place,
-        amount: c.amount,
-        paid_amount: c.paid_amount,
+        amount: Number(c.amount) || 0,
+        paid_amount: Number(c.paid_amount) || 0,
         status: c.status
       }));
 
@@ -717,7 +722,7 @@ export default function App() {
                         <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
                           <motion.div 
                             initial={{ width: 0 }}
-                            animate={{ width: `${(place.paid / place.total) * 100}%` }}
+                            animate={{ width: `${place.total > 0 ? (place.paid / place.total) * 100 : 0}%` }}
                             className="h-full bg-indigo-500 rounded-full"
                           />
                         </div>
@@ -759,7 +764,7 @@ export default function App() {
                             </p>
                           </div>
                         </div>
-                        <p className="font-bold text-indigo-600">₹{payer.amount.toLocaleString()}</p>
+                        <p className="font-bold text-indigo-600">₹{payer.paid_amount.toLocaleString()}</p>
                       </div>
                     ))}
                     {stats?.leaderboard.length === 0 && (
