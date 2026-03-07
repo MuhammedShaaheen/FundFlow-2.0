@@ -34,10 +34,27 @@ type View = 'dashboard' | 'list' | 'input';
 
 const ADMIN_PASSWORD = 'Muneer786';
 
+const parseNum = (val: any): number => {
+  if (typeof val === 'number') return val;
+  if (val === undefined || val === null || val === '') return 0;
+  const cleaned = val.toString().replace(/,/g, '');
+  const parsed = parseFloat(cleaned);
+  return isNaN(parsed) ? 0 : parsed;
+};
+
 export default function App() {
   const [view, setView] = useState<View>('dashboard');
   const [collections, setCollections] = useState<Collection[]>([]);
-  const [stats, setStats] = useState<Stats | null>(null);
+  const [stats, setStats] = useState<Stats>({
+    totalPaid: 0,
+    totalUnpaid: 0,
+    totalTarget: 0,
+    countTotal: 0,
+    countCollected: 0,
+    countPending: 0,
+    placeStats: [],
+    leaderboard: []
+  });
   const [loading, setLoading] = useState(true);
   const [selectedPlace, setSelectedPlace] = useState<string>('All');
   const [editingCollection, setEditingCollection] = useState<Collection | null>(null);
@@ -59,29 +76,30 @@ export default function App() {
     place: '',
     contact: '',
     amount: '',
-    paid_amount: '',
-    status: 'unpaid' as 'paid' | 'unpaid' | 'partial'
+    status: 'unpaid' as 'paid' | 'unpaid'
   });
 
   const calculateStats = (data: Collection[]): Stats => {
-    const totalPaid = data.reduce((sum, c) => sum + (Number(c.paid_amount) || 0), 0);
-    const totalTarget = data.reduce((sum, c) => sum + (Number(c.amount) || 0), 0);
-    const totalUnpaid = Math.max(0, totalTarget - totalPaid);
+    const totalPaid = data.reduce((sum, c) => sum + (c.status === 'paid' ? parseNum(c.amount) : 0), 0);
+    const totalTarget = data.reduce((sum, c) => sum + parseNum(c.amount), 0);
+    const totalUnpaid = data.reduce((sum, c) => sum + (c.status === 'unpaid' ? parseNum(c.amount) : 0), 0);
     
     const countTotal = data.length;
-    const countCollected = data.filter(c => (Number(c.paid_amount) || 0) > 0).length;
-    const countPending = data.filter(c => c.status !== 'paid').length;
+    const countCollected = data.filter(c => c.status === 'paid').length;
+    const countPending = data.filter(c => c.status === 'unpaid').length;
 
     const placeMap = new Map<string, { total: number, paid: number, unpaid: number }>();
     data.forEach(c => {
       const placeName = c.place || 'Unknown';
       const current = placeMap.get(placeName) || { total: 0, paid: 0, unpaid: 0 };
-      const amt = Number(c.amount) || 0;
-      const paid = Number(c.paid_amount) || 0;
+      const amt = parseNum(c.amount);
       
       current.total += amt;
-      current.paid += paid;
-      current.unpaid += Math.max(0, amt - paid);
+      if (c.status === 'paid') {
+        current.paid += amt;
+      } else {
+        current.unpaid += amt;
+      }
       placeMap.set(placeName, current);
     });
 
@@ -91,14 +109,13 @@ export default function App() {
     })).sort((a, b) => b.paid - a.paid);
 
     const leaderboard = [...data]
-      .filter(c => (Number(c.paid_amount) || 0) > 0) // Only show people who have actually paid something
-      .sort((a, b) => (Number(b.paid_amount) || 0) - (Number(a.paid_amount) || 0))
+      .filter(c => c.status === 'paid')
+      .sort((a, b) => parseNum(b.amount) - parseNum(a.amount))
       .slice(0, 10)
       .map(c => ({
         name: c.name,
         place: c.place,
-        amount: Number(c.amount) || 0,
-        paid_amount: Number(c.paid_amount) || 0,
+        amount: parseNum(c.amount),
         status: c.status
       }));
 
@@ -135,24 +152,7 @@ export default function App() {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    const amount = parseFloat(formData.amount);
-    let paid_amount = parseFloat(formData.paid_amount) || 0;
-
-    // Data Protection Logic
-    if (formData.status === 'paid') {
-      paid_amount = amount;
-    } else if (formData.status === 'unpaid') {
-      paid_amount = 0;
-    } else if (formData.status === 'partial') {
-      if (paid_amount >= amount) {
-        alert(`⚠️ Partial payment cannot be equal to or greater than the total amount (₹${amount}). Please set status to "Paid" instead.`);
-        return;
-      }
-      if (paid_amount <= 0) {
-        alert('⚠️ Partial payment must be greater than 0. Please set status to "Unpaid" if no payment was made.');
-        return;
-      }
-    }
+    const amount = parseNum(formData.amount);
 
     try {
       const savedData = localStorage.getItem('collections');
@@ -161,7 +161,7 @@ export default function App() {
       if (editingCollection) {
         collectionsData = collectionsData.map(c => 
           c.id === editingCollection.id 
-            ? { ...c, ...formData, amount, paid_amount } 
+            ? { ...c, ...formData, amount } 
             : c
         );
       } else {
@@ -169,14 +169,13 @@ export default function App() {
           id: Date.now(),
           ...formData,
           amount,
-          paid_amount,
           created_at: new Date().toISOString()
         };
         collectionsData.push(newCollection);
       }
 
       localStorage.setItem('collections', JSON.stringify(collectionsData));
-      setFormData({ name: '', place: '', contact: '', amount: '', paid_amount: '', status: 'unpaid' });
+      setFormData({ name: '', place: '', contact: '', amount: '', status: 'unpaid' });
       setEditingCollection(null);
       setView('list');
       fetchData();
@@ -197,7 +196,6 @@ export default function App() {
             place: collection.place,
             contact: collection.contact,
             amount: collection.amount.toString(),
-            paid_amount: collection.paid_amount.toString(),
             status: collection.status
           });
           setView('input');
@@ -211,7 +209,6 @@ export default function App() {
       place: collection.place,
       contact: collection.contact,
       amount: collection.amount.toString(),
-      paid_amount: collection.paid_amount.toString(),
       status: collection.status
     });
     setView('input');
@@ -249,8 +246,7 @@ export default function App() {
       'Name': c.name,
       'Place': c.place,
       'Contact': c.contact,
-      'Target Amount': c.amount,
-      'Paid Amount': c.paid_amount,
+      'Amount': c.amount,
       'Status': c.status.toUpperCase(),
       'Date': new Date(c.created_at).toLocaleDateString()
     }));
@@ -275,29 +271,40 @@ export default function App() {
         const ws = wb.Sheets[wsname];
         const data = XLSX.utils.sheet_to_json(ws);
 
-        // Map data to match our schema
-        // Expected columns: Name, Place, Contact, Amount, Status
+        // Map data to match our schema with flexible header matching
         const mappedData = data.map((row: any) => {
-          const statusRaw = (row.Status || row.status || 'unpaid').toString().toLowerCase();
-          let status: 'paid' | 'unpaid' | 'partial' = 'unpaid';
-          if (statusRaw === 'paid') status = 'paid';
-          else if (statusRaw === 'partial') status = 'partial';
+          const getVal = (keys: string[]) => {
+            for (const k of keys) {
+              if (row[k] !== undefined && row[k] !== null) return row[k];
+              if (row[k.toLowerCase()] !== undefined && row[k.toLowerCase()] !== null) return row[k.toLowerCase()];
+              if (row[k.toUpperCase()] !== undefined && row[k.toUpperCase()] !== null) return row[k.toUpperCase()];
+              // Handle spaces
+              const withSpace = k.replace(/([A-Z])/g, ' $1').trim();
+              if (row[withSpace] !== undefined && row[withSpace] !== null) return row[withSpace];
+            }
+            return undefined;
+          };
+
+          const name = (getVal(['Name', 'Payer', 'Full Name']) || 'Unknown').toString();
+          const place = (getVal(['Place', 'Location', 'Area', 'Address']) || 'Unknown').toString();
+          const contact = (getVal(['Contact', 'Phone', 'Mobile', 'Number']) || '').toString();
+          const amount = parseNum(getVal(['Amount', 'Target', 'Total', 'Goal']));
           
-          // Handle void/empty amount cells by defaulting to 0
-          const amount = row.Amount !== undefined && row.Amount !== null && row.Amount !== "" ? parseFloat(row.Amount) : 0;
-          const paid_amount = row.PaidAmount !== undefined && row.PaidAmount !== null && row.PaidAmount !== "" ? parseFloat(row.PaidAmount) : 
-                             (row['Paid Amount'] !== undefined && row['Paid Amount'] !== null && row['Paid Amount'] !== "" ? parseFloat(row['Paid Amount']) : 
-                             (row.paid_amount !== undefined && row.paid_amount !== null && row.paid_amount !== "" ? parseFloat(row.paid_amount) : 0));
+          const statusRaw = (getVal(['Status', 'PaymentStatus']) || '').toString().toLowerCase();
+          
+          let status: 'paid' | 'unpaid' = 'unpaid';
+          if (statusRaw === 'paid' || statusRaw === 'yes' || statusRaw === 'true') {
+            status = 'paid';
+          }
 
           return {
-            name: (row.Name || row.name || 'Unknown').toString(),
-            place: (row.Place || row.place || 'Unknown').toString(),
-            contact: (row.Contact || row.contact || '').toString(),
-            amount: isNaN(amount) ? 0 : amount,
-            paid_amount: isNaN(paid_amount) ? 0 : paid_amount,
+            name,
+            place,
+            contact,
+            amount,
             status
           };
-        }).filter(item => item.name); // Only filter if name is completely missing
+        }).filter(item => item.name && item.name !== 'Unknown');
 
         if (mappedData.length === 0) {
           alert('No valid data found in the Excel file. Please ensure columns are named: Name, Place, Contact, Amount, Status.');
@@ -587,7 +594,7 @@ export default function App() {
                 <h3 className="text-xl font-bold mb-2">Import from Excel</h3>
                 <p className="text-slate-500 text-sm mb-6">
                   Upload an Excel file (.xlsx or .xls) with the following columns: 
-                  <span className="font-bold text-slate-700"> Name, Place, Contact, Amount, Status, Paid Amount</span>.
+                  <span className="font-bold text-slate-700"> Name, Place, Contact, Amount, Status</span>.
                 </p>
 
                 <div className="space-y-4">
@@ -655,11 +662,11 @@ export default function App() {
                   <div className="flex justify-between items-end">
                     <div>
                       <h3 className="text-slate-500 text-sm font-medium">Overall Target</h3>
-                      <p className="text-3xl font-bold mt-1">₹{stats?.totalTarget.toLocaleString()}</p>
+                      <p className="text-3xl font-bold mt-1">₹{stats.totalTarget.toLocaleString()}</p>
                     </div>
                     <div className="flex flex-col items-center text-slate-400 bg-slate-50 p-2 rounded-xl min-w-[60px]">
                       <Users size={18} className="mb-1" />
-                      <span className="text-xs font-bold text-slate-600">{stats?.countTotal}</span>
+                      <span className="text-xs font-bold text-slate-600">{stats.countTotal}</span>
                     </div>
                   </div>
                 </div>
@@ -674,11 +681,11 @@ export default function App() {
                   <div className="flex justify-between items-end">
                     <div>
                       <h3 className="text-slate-500 text-sm font-medium">Total Collected</h3>
-                      <p className="text-3xl font-bold mt-1">₹{stats?.totalPaid.toLocaleString()}</p>
+                      <p className="text-3xl font-bold mt-1">₹{stats.totalPaid.toLocaleString()}</p>
                     </div>
                     <div className="flex flex-col items-center text-slate-400 bg-slate-50 p-2 rounded-xl min-w-[60px]">
                       <Users size={18} className="mb-1" />
-                      <span className="text-xs font-bold text-slate-600">{stats?.countCollected}</span>
+                      <span className="text-xs font-bold text-slate-600">{stats.countCollected}</span>
                     </div>
                   </div>
                 </div>
@@ -693,11 +700,11 @@ export default function App() {
                   <div className="flex justify-between items-end">
                     <div>
                       <h3 className="text-slate-500 text-sm font-medium">Pending Amount</h3>
-                      <p className="text-3xl font-bold mt-1">₹{stats?.totalUnpaid.toLocaleString()}</p>
+                      <p className="text-3xl font-bold mt-1">₹{stats.totalUnpaid.toLocaleString()}</p>
                     </div>
                     <div className="flex flex-col items-center text-slate-400 bg-slate-50 p-2 rounded-xl min-w-[60px]">
                       <Users size={18} className="mb-1" />
-                      <span className="text-xs font-bold text-slate-600">{stats?.countPending}</span>
+                      <span className="text-xs font-bold text-slate-600">{stats.countPending}</span>
                     </div>
                   </div>
                 </div>
@@ -713,7 +720,7 @@ export default function App() {
                     </h2>
                   </div>
                   <div className="space-y-4">
-                    {stats?.placeStats.map((place) => (
+                    {stats.placeStats.map((place) => (
                       <div key={place.place} className="group">
                         <div className="flex justify-between text-sm mb-2">
                           <span className="font-semibold text-slate-700">{place.place}</span>
@@ -728,7 +735,7 @@ export default function App() {
                         </div>
                       </div>
                     ))}
-                    {stats?.placeStats.length === 0 && (
+                    {stats.placeStats.length === 0 && (
                       <p className="text-center py-10 text-slate-400 italic">No data available yet</p>
                     )}
                   </div>
@@ -743,7 +750,7 @@ export default function App() {
                     </h2>
                   </div>
                   <div className="space-y-4">
-                    {stats?.leaderboard.map((payer, idx) => (
+                    {stats.leaderboard.map((payer, idx) => (
                       <div key={idx} className="flex items-center justify-between p-3 rounded-xl hover:bg-slate-50 transition-colors">
                         <div className="flex items-center gap-4">
                           <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-sm ${
@@ -764,10 +771,10 @@ export default function App() {
                             </p>
                           </div>
                         </div>
-                        <p className="font-bold text-indigo-600">₹{payer.paid_amount.toLocaleString()}</p>
+                        <p className="font-bold text-indigo-600">₹{payer.amount.toLocaleString()}</p>
                       </div>
                     ))}
-                    {stats?.leaderboard.length === 0 && (
+                    {stats.leaderboard.length === 0 && (
                       <p className="text-center py-10 text-slate-400 italic">No payers found</p>
                     )}
                   </div>
@@ -849,18 +856,11 @@ export default function App() {
                             <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold ${
                               c.status === 'paid' 
                                 ? 'bg-emerald-50 text-emerald-700' 
-                                : c.status === 'partial'
-                                ? 'bg-amber-50 text-amber-700'
                                 : 'bg-rose-50 text-rose-700'
                             }`}>
-                              {c.status === 'paid' ? <CheckCircle2 size={12} /> : c.status === 'partial' ? <CircleDollarSign size={12} /> : <XCircle size={12} />}
+                              {c.status === 'paid' ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
                               {c.status.toUpperCase()}
                             </span>
-                            {c.status === 'partial' && (
-                              <div className="text-[10px] text-slate-400 mt-1 font-medium">
-                                Paid: ₹{c.paid_amount.toLocaleString()}
-                              </div>
-                            )}
                           </td>
                           <td className="px-6 py-4 text-right">
                             {isAdmin ? (
@@ -905,8 +905,6 @@ export default function App() {
                         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
                           c.status === 'paid' 
                             ? 'bg-emerald-50 text-emerald-700' 
-                            : c.status === 'partial'
-                            ? 'bg-amber-50 text-amber-700'
                             : 'bg-rose-50 text-rose-700'
                         }`}>
                           {c.status.toUpperCase()}
@@ -922,9 +920,6 @@ export default function App() {
                           <span className="text-[10px] text-slate-400 uppercase font-bold">Amount</span>
                           <div className="flex flex-col items-end">
                             <span className="text-sm font-bold text-slate-900">₹{c.amount.toLocaleString()}</span>
-                            {c.status === 'partial' && (
-                              <span className="text-[10px] text-amber-600 font-bold">Paid: ₹{c.paid_amount.toLocaleString()}</span>
-                            )}
                           </div>
                         </div>
                       </div>
@@ -1047,7 +1042,7 @@ export default function App() {
 
                   <div className="space-y-2">
                     <label className="text-sm font-bold text-slate-700 ml-1">Payment Status</label>
-                    <div className="grid grid-cols-3 gap-3">
+                    <div className="grid grid-cols-2 gap-3">
                       <button
                         type="button"
                         onClick={() => setFormData({ ...formData, status: 'paid' })}
@@ -1059,18 +1054,6 @@ export default function App() {
                       >
                         <CheckCircle2 size={16} />
                         Paid
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setFormData({ ...formData, status: 'partial' })}
-                        className={`flex items-center justify-center gap-2 py-3 rounded-xl border-2 transition-all font-bold text-sm ${
-                          formData.status === 'partial'
-                            ? 'bg-amber-50 border-amber-500 text-amber-700'
-                            : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'
-                        }`}
-                      >
-                        <CircleDollarSign size={16} />
-                        Partial
                       </button>
                       <button
                         type="button"
@@ -1086,24 +1069,6 @@ export default function App() {
                       </button>
                     </div>
                   </div>
-
-                  {formData.status === 'partial' && (
-                    <motion.div 
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: 'auto' }}
-                      className="space-y-2"
-                    >
-                      <label className="text-sm font-bold text-slate-700 ml-1">Paid Amount (₹)</label>
-                      <input
-                        required
-                        type="number"
-                        placeholder="Enter amount already paid"
-                        value={formData.paid_amount}
-                        onChange={(e) => setFormData({ ...formData, paid_amount: e.target.value })}
-                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
-                      />
-                    </motion.div>
-                  )}
 
                   <div className="pt-4 flex gap-4">
                     <button

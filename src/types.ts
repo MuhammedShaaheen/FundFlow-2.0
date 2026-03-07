@@ -4,8 +4,7 @@ export interface Collection {
   place: string;
   contact: string;
   amount: number;
-  paid_amount: number;
-  status: 'paid' | 'unpaid' | 'partial';
+  status: 'paid' | 'unpaid';
   created_at: string;
 }
 
@@ -26,7 +25,6 @@ export interface Stats {
     name: string;
     place: string;
     amount: number;
-    paid_amount: number;
-    status: 'paid' | 'unpaid' | 'partial';
+    status: 'paid' | 'unpaid';
   }[];
 }
