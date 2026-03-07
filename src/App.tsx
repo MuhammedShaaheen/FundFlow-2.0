@@ -63,19 +63,61 @@ export default function App() {
     status: 'unpaid' as 'paid' | 'unpaid' | 'partial'
   });
 
-  const fetchData = async () => {
+  const calculateStats = (data: Collection[]): Stats => {
+    const totalPaid = data.reduce((sum, c) => sum + c.paid_amount, 0);
+    const totalTarget = data.reduce((sum, c) => sum + c.amount, 0);
+    const totalUnpaid = totalTarget - totalPaid;
+    
+    const countTotal = data.length;
+    const countCollected = data.filter(c => c.paid_amount > 0).length;
+    const countPending = data.filter(c => c.status !== 'paid').length;
+
+    const placeMap = new Map<string, { total: number, paid: number, unpaid: number }>();
+    data.forEach(c => {
+      const current = placeMap.get(c.place) || { total: 0, paid: 0, unpaid: 0 };
+      current.total += c.amount;
+      current.paid += c.paid_amount;
+      current.unpaid += (c.amount - c.paid_amount);
+      placeMap.set(c.place, current);
+    });
+
+    const placeStats = Array.from(placeMap.entries()).map(([place, stats]) => ({
+      place,
+      ...stats
+    })).sort((a, b) => b.paid - a.paid);
+
+    const leaderboard = [...data]
+      .sort((a, b) => b.paid_amount - a.paid_amount)
+      .slice(0, 10)
+      .map(c => ({
+        name: c.name,
+        place: c.place,
+        amount: c.amount,
+        paid_amount: c.paid_amount,
+        status: c.status
+      }));
+
+    return {
+      totalPaid,
+      totalUnpaid,
+      totalTarget,
+      countTotal,
+      countCollected,
+      countPending,
+      placeStats,
+      leaderboard
+    };
+  };
+
+  const fetchData = () => {
     setLoading(true);
     try {
-      const [collectionsRes, statsRes] = await Promise.all([
-        fetch('/api/collections'),
-        fetch('/api/stats')
-      ]);
-      const collectionsData = await collectionsRes.json();
-      const statsData = await statsRes.json();
+      const savedData = localStorage.getItem('collections');
+      const collectionsData: Collection[] = savedData ? JSON.parse(savedData) : [];
       setCollections(collectionsData);
-      setStats(statsData);
+      setStats(calculateStats(collectionsData));
     } catch (error) {
-      console.error('Error fetching data:', error);
+      console.error('Error loading data:', error);
     } finally {
       setLoading(false);
     }
@@ -85,7 +127,7 @@ export default function App() {
     fetchData();
   }, []);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
     const amount = parseFloat(formData.amount);
@@ -107,31 +149,35 @@ export default function App() {
       }
     }
 
-    const url = editingCollection ? `/api/collections/${editingCollection.id}` : '/api/collections';
-    const method = editingCollection ? 'PUT' : 'POST';
-
     try {
-      const response = await fetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const savedData = localStorage.getItem('collections');
+      let collectionsData: Collection[] = savedData ? JSON.parse(savedData) : [];
+
+      if (editingCollection) {
+        collectionsData = collectionsData.map(c => 
+          c.id === editingCollection.id 
+            ? { ...c, ...formData, amount, paid_amount } 
+            : c
+        );
+      } else {
+        const newCollection: Collection = {
+          id: Date.now(),
           ...formData,
           amount,
           paid_amount,
-        })
-      });
-
-      if (response.ok) {
-        setFormData({ name: '', place: '', contact: '', amount: '', paid_amount: '', status: 'unpaid' });
-        setEditingCollection(null);
-        setView('list');
-        fetchData();
-      } else {
-        const err = await response.json();
-        alert(`Error: ${err.error}`);
+          created_at: new Date().toISOString()
+        };
+        collectionsData.push(newCollection);
       }
+
+      localStorage.setItem('collections', JSON.stringify(collectionsData));
+      setFormData({ name: '', place: '', contact: '', amount: '', paid_amount: '', status: 'unpaid' });
+      setEditingCollection(null);
+      setView('list');
+      fetchData();
     } catch (error) {
       console.error('Error saving collection:', error);
+      alert('Failed to save data to local storage.');
     }
   };
 
@@ -174,21 +220,19 @@ export default function App() {
     setDeleteConfirm(id);
   };
 
-  const handleDelete = async (id: number | null) => {
+  const handleDelete = (id: number | null) => {
     if (!id) return;
     setDeleting(true);
     try {
-      const response = await fetch(`/api/collections/${id}`, { method: 'DELETE' });
-      if (response.ok) {
-        setDeleteConfirm(null);
-        fetchData();
-      } else {
-        const err = await response.json();
-        alert(`Error: ${err.error || 'Failed to delete'}`);
-      }
+      const savedData = localStorage.getItem('collections');
+      let collectionsData: Collection[] = savedData ? JSON.parse(savedData) : [];
+      collectionsData = collectionsData.filter(c => c.id !== id);
+      localStorage.setItem('collections', JSON.stringify(collectionsData));
+      setDeleteConfirm(null);
+      fetchData();
     } catch (error) {
       console.error('Error deleting collection:', error);
-      alert('Network error: Could not reach the server. Please try again.');
+      alert('Failed to delete data from local storage.');
     } finally {
       setDeleting(false);
     }
@@ -256,17 +300,21 @@ export default function App() {
           return;
         }
 
-        const response = await fetch('/api/collections/bulk', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(mappedData)
-        });
+        const savedData = localStorage.getItem('collections');
+        let collectionsData: Collection[] = savedData ? JSON.parse(savedData) : [];
+        
+        const newRecords = mappedData.map((item, index) => ({
+          id: Date.now() + index,
+          ...item,
+          created_at: new Date().toISOString()
+        }));
 
-        if (response.ok) {
-          alert(`Successfully imported ${mappedData.length} records!`);
-          setShowImportModal(false);
-          fetchData();
-        }
+        collectionsData = [...collectionsData, ...newRecords];
+        localStorage.setItem('collections', JSON.stringify(collectionsData));
+
+        alert(`Successfully imported ${mappedData.length} records!`);
+        setShowImportModal(false);
+        fetchData();
       } catch (error) {
         console.error('Error importing Excel:', error);
         alert('Failed to parse Excel file. Please check the format.');
