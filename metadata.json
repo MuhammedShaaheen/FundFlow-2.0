@@ -1,0 +1,5 @@
+{
+  "name": "FundFlow Manager",
+  "description": "A comprehensive fund collection management system with real-time dashboard, place-wise tracking, and payer leaderboards.",
+  "requestFramePermissions": []
+}
