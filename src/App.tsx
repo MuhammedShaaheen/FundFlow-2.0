@@ -29,6 +29,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
 import type { Collection, Stats } from './types';
+import { supabase } from './supabaseClient';
 
 type View = 'dashboard' | 'list' | 'input';
 
@@ -69,55 +70,75 @@ export default function App() {
   const [showPasswordPrompt, setShowPasswordPrompt] = useState<{ type: 'view' | 'action', action?: () => void } | null>(null);
 
   const [deleting, setDeleting] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // Form state
   const [formData, setFormData] = useState({
     name: '',
     place: '',
     contact: '',
+    target_amount: '',
     amount: '',
-    status: 'unpaid' as 'paid' | 'unpaid'
+    status: 'unpaid' as 'paid' | 'unpaid' | 'partial'
   });
 
   const calculateStats = (data: Collection[]): Stats => {
-    const totalPaid = data.reduce((sum, c) => sum + (c.status === 'paid' ? parseNum(c.amount) : 0), 0);
-    const totalTarget = data.reduce((sum, c) => sum + parseNum(c.amount), 0);
-    const totalUnpaid = data.reduce((sum, c) => sum + (c.status === 'unpaid' ? parseNum(c.amount) : 0), 0);
+    const totalPaid = data.reduce((sum, c) => sum + parseNum(c.amount), 0);
+    const totalTarget = data.reduce((sum, c) => sum + parseNum(c.target_amount), 0);
+    const totalUnpaid = totalTarget - totalPaid;
     
     const countTotal = data.length;
-    const countCollected = data.filter(c => c.status === 'paid').length;
+    const countCollected = data.filter(c => c.status === 'paid' || c.status === 'partial').length;
     const countPending = data.filter(c => c.status === 'unpaid').length;
 
     const placeMap = new Map<string, { total: number, paid: number, unpaid: number }>();
     data.forEach(c => {
       const placeName = c.place || 'Unknown';
       const current = placeMap.get(placeName) || { total: 0, paid: 0, unpaid: 0 };
-      const amt = parseNum(c.amount);
+      const targetAmt = parseNum(c.target_amount);
+      const paidAmt = parseNum(c.amount);
       
-      current.total += amt;
-      if (c.status === 'paid') {
-        current.paid += amt;
-      } else {
-        current.unpaid += amt;
-      }
+      current.total += targetAmt;
+      current.paid += paidAmt;
+      current.unpaid += (targetAmt - paidAmt);
       placeMap.set(placeName, current);
     });
 
     const placeStats = Array.from(placeMap.entries()).map(([place, stats]) => ({
       place,
       ...stats
-    })).sort((a, b) => b.paid - a.paid);
+    })).sort((a, b) => b.total - a.total)
+    .slice(0, 10);
 
-    const leaderboard = [...data]
-      .filter(c => c.status === 'paid')
-      .sort((a, b) => parseNum(b.amount) - parseNum(a.amount))
-      .slice(0, 10)
-      .map(c => ({
-        name: c.name,
-        place: c.place,
-        amount: parseNum(c.amount),
-        status: c.status
-      }));
+    const payerMap = new Map<string, { name: string, place: string, target_amount: number, amount: number, status: 'paid' | 'unpaid' | 'partial' }>();
+    data.forEach(c => {
+      const name = c.name || 'Unknown';
+      const current = payerMap.get(name) || { 
+        name, 
+        place: c.place, 
+        target_amount: 0, 
+        amount: 0, 
+        status: 'unpaid' as const 
+      };
+      
+      current.target_amount += parseNum(c.target_amount);
+      current.amount += parseNum(c.amount);
+      
+      // Update status based on total amounts
+      if (current.amount >= current.target_amount && current.target_amount > 0) {
+        current.status = 'paid';
+      } else if (current.amount > 0) {
+        current.status = 'partial';
+      } else {
+        current.status = 'unpaid';
+      }
+      
+      payerMap.set(name, current);
+    });
+
+    const leaderboard = Array.from(payerMap.values())
+      .sort((a, b) => b.target_amount - a.target_amount)
+      .slice(0, 10);
 
     return {
       totalPaid,
@@ -131,57 +152,98 @@ export default function App() {
     };
   };
 
-  const fetchData = () => {
+  const fetchData = async () => {
     setLoading(true);
     try {
-      const savedData = localStorage.getItem('collections');
-      const collectionsData: Collection[] = savedData ? JSON.parse(savedData) : [];
+      const { data, error } = await supabase
+        .from('transactions')
+        .select('*')
+        .order('created_at', { ascending: false });
+      
+      if (error) throw error;
+
+      const collectionsData: Collection[] = (data || []).map((item: any) => ({
+        ...item,
+        target_amount: parseNum(item.target_amount !== undefined && item.target_amount !== null ? item.target_amount : item.amount),
+        amount: parseNum(item.amount),
+        contact: item.contact || ''
+      }));
       setCollections(collectionsData);
       setStats(calculateStats(collectionsData));
     } catch (error) {
       console.error('Error loading data:', error);
+      alert('Failed to load data from Supabase. Please check your configuration.');
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
+    if (!import.meta.env.VITE_SUPABASE_URL || !import.meta.env.VITE_SUPABASE_KEY) {
+      alert('Supabase configuration is missing. Please set VITE_SUPABASE_URL and VITE_SUPABASE_KEY in your environment variables.');
+    }
     fetchData();
   }, []);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setSaving(true);
     
-    const amount = parseNum(formData.amount);
+    const target_amount = parseNum(formData.target_amount);
+    let amount = 0;
+    
+    if (formData.status === 'paid') {
+      amount = target_amount;
+    } else if (formData.status === 'partial') {
+      amount = parseNum(formData.amount);
+    }
+    
+    const dataToSave = {
+      name: formData.name,
+      place: formData.place,
+      contact: formData.contact,
+      target_amount: target_amount,
+      amount: amount,
+      status: formData.status
+    };
 
     try {
-      const savedData = localStorage.getItem('collections');
-      let collectionsData: Collection[] = savedData ? JSON.parse(savedData) : [];
-
+      console.log('Submitting data to Supabase:', dataToSave);
       if (editingCollection) {
-        collectionsData = collectionsData.map(c => 
-          c.id === editingCollection.id 
-            ? { ...c, ...formData, amount } 
-            : c
-        );
+        console.log('Updating record with ID:', editingCollection.id);
+        const { error } = await supabase
+          .from('transactions')
+          .update(dataToSave)
+          .eq('id', editingCollection.id);
+        
+        if (error) {
+          console.error('Supabase update error:', error);
+          throw error;
+        }
+        console.log('Update successful');
       } else {
-        const newCollection: Collection = {
-          id: Date.now(),
-          ...formData,
-          amount,
-          created_at: new Date().toISOString()
-        };
-        collectionsData.push(newCollection);
+        console.log('Inserting new record');
+        const { error } = await supabase
+          .from('transactions')
+          .insert([dataToSave]);
+        
+        if (error) {
+          console.error('Supabase insert error:', error);
+          throw error;
+        }
+        console.log('Insert successful');
       }
 
-      localStorage.setItem('collections', JSON.stringify(collectionsData));
-      setFormData({ name: '', place: '', contact: '', amount: '', status: 'unpaid' });
+      setFormData({ name: '', place: '', contact: '', target_amount: '', amount: '', status: 'unpaid' });
       setEditingCollection(null);
       setView('list');
-      fetchData();
-    } catch (error) {
+      await fetchData();
+      alert(editingCollection ? 'Record updated successfully!' : 'New record saved successfully!');
+    } catch (error: any) {
       console.error('Error saving collection:', error);
-      alert('Failed to save data to local storage.');
+      alert(`Failed to save data: ${error.message || 'Unknown error'}. Check console for details.`);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -195,7 +257,8 @@ export default function App() {
             name: collection.name,
             place: collection.place,
             contact: collection.contact,
-            amount: collection.amount.toString(),
+            target_amount: (collection.target_amount || 0).toString(),
+            amount: (collection.amount || 0).toString(),
             status: collection.status
           });
           setView('input');
@@ -208,7 +271,8 @@ export default function App() {
       name: collection.name,
       place: collection.place,
       contact: collection.contact,
-      amount: collection.amount.toString(),
+      target_amount: (collection.target_amount || 0).toString(),
+      amount: (collection.amount || 0).toString(),
       status: collection.status
     });
     setView('input');
@@ -222,19 +286,22 @@ export default function App() {
     setDeleteConfirm(id);
   };
 
-  const handleDelete = (id: number | null) => {
+  const handleDelete = async (id: number | null) => {
     if (!id) return;
     setDeleting(true);
     try {
-      const savedData = localStorage.getItem('collections');
-      let collectionsData: Collection[] = savedData ? JSON.parse(savedData) : [];
-      collectionsData = collectionsData.filter(c => c.id !== id);
-      localStorage.setItem('collections', JSON.stringify(collectionsData));
+      const { error } = await supabase
+        .from('transactions')
+        .delete()
+        .eq('id', id);
+
+      if (error) throw error;
+
       setDeleteConfirm(null);
-      fetchData();
+      await fetchData();
     } catch (error) {
       console.error('Error deleting collection:', error);
-      alert('Failed to delete data from local storage.');
+      alert('Failed to delete data from Supabase.');
     } finally {
       setDeleting(false);
     }
@@ -246,7 +313,8 @@ export default function App() {
       'Name': c.name,
       'Place': c.place,
       'Contact': c.contact,
-      'Amount': c.amount,
+      'Target Amount': c.target_amount,
+      'Paid Amount': c.amount,
       'Status': c.status.toUpperCase(),
       'Date': new Date(c.created_at).toLocaleDateString()
     }));
@@ -288,48 +356,46 @@ export default function App() {
           const name = (getVal(['Name', 'Payer', 'Full Name']) || 'Unknown').toString();
           const place = (getVal(['Place', 'Location', 'Area', 'Address']) || 'Unknown').toString();
           const contact = (getVal(['Contact', 'Phone', 'Mobile', 'Number']) || '').toString();
-          const amount = parseNum(getVal(['Amount', 'Target', 'Total', 'Goal']));
+          const target_amount = parseNum(getVal(['Target Amount', 'target_amount', 'Target', 'Total', 'Goal']));
+          const amount = parseNum(getVal(['Paid Amount', 'Amount', 'Paid', 'Collected']));
           
           const statusRaw = (getVal(['Status', 'PaymentStatus']) || '').toString().toLowerCase();
           
-          let status: 'paid' | 'unpaid' = 'unpaid';
-          if (statusRaw === 'paid' || statusRaw === 'yes' || statusRaw === 'true') {
+          let status: 'paid' | 'unpaid' | 'partial' = 'unpaid';
+          if (statusRaw === 'paid' || statusRaw === 'yes' || statusRaw === 'true' || (target_amount > 0 && amount >= target_amount)) {
             status = 'paid';
+          } else if (statusRaw === 'partial' || amount > 0) {
+            status = 'partial';
           }
 
           return {
             name,
             place,
             contact,
+            target_amount,
             amount,
             status
           };
         }).filter(item => item.name && item.name !== 'Unknown');
 
         if (mappedData.length === 0) {
-          alert('No valid data found in the Excel file. Please ensure columns are named: Name, Place, Contact, Amount, Status.');
+          alert('No valid data found in the Excel file. Please ensure columns are named: Name, Place, Contact, target_amount, Amount, Status.');
           setImporting(false);
           return;
         }
 
-        const savedData = localStorage.getItem('collections');
-        let collectionsData: Collection[] = savedData ? JSON.parse(savedData) : [];
-        
-        const newRecords = mappedData.map((item, index) => ({
-          id: Date.now() + index,
-          ...item,
-          created_at: new Date().toISOString()
-        }));
+        const { error } = await supabase
+          .from('transactions')
+          .insert(mappedData);
 
-        collectionsData = [...collectionsData, ...newRecords];
-        localStorage.setItem('collections', JSON.stringify(collectionsData));
+        if (error) throw error;
 
         alert(`Successfully imported ${mappedData.length} records!`);
         setShowImportModal(false);
-        fetchData();
+        await fetchData();
       } catch (error) {
         console.error('Error importing Excel:', error);
-        alert('Failed to parse Excel file. Please check the format.');
+        alert('Failed to import Excel data to Supabase.');
       } finally {
         setImporting(false);
       }
@@ -363,9 +429,22 @@ export default function App() {
     <button
       onClick={() => {
         if (id === 'input' && !isAdmin) {
-          setShowPasswordPrompt({ type: 'view', action: () => setView('input') });
+          setShowPasswordPrompt({ 
+            type: 'view', 
+            action: () => {
+              setEditingCollection(null);
+              setFormData({ name: '', place: '', contact: '', target_amount: '', amount: '', status: 'unpaid' });
+              setView('input');
+            } 
+          });
           return;
         }
+        
+        if (id === 'input') {
+          setEditingCollection(null);
+          setFormData({ name: '', place: '', contact: '', target_amount: '', amount: '', status: 'unpaid' });
+        }
+        
         setView(id);
         if (id !== 'input') setEditingCollection(null);
       }}
@@ -594,7 +673,7 @@ export default function App() {
                 <h3 className="text-xl font-bold mb-2">Import from Excel</h3>
                 <p className="text-slate-500 text-sm mb-6">
                   Upload an Excel file (.xlsx or .xls) with the following columns: 
-                  <span className="font-bold text-slate-700"> Name, Place, Contact, Amount, Status</span>.
+                  <span className="font-bold text-slate-700"> Name, Place, Contact, target_amount, Amount, Status</span>.
                 </p>
 
                 <div className="space-y-4">
@@ -662,7 +741,7 @@ export default function App() {
                   <div className="flex justify-between items-end">
                     <div>
                       <h3 className="text-slate-500 text-sm font-medium">Overall Target</h3>
-                      <p className="text-3xl font-bold mt-1">₹{stats.totalTarget.toLocaleString()}</p>
+                      <p className="text-3xl font-bold mt-1">₹{(stats.totalTarget || 0).toLocaleString()}</p>
                     </div>
                     <div className="flex flex-col items-center text-slate-400 bg-slate-50 p-2 rounded-xl min-w-[60px]">
                       <Users size={18} className="mb-1" />
@@ -681,7 +760,7 @@ export default function App() {
                   <div className="flex justify-between items-end">
                     <div>
                       <h3 className="text-slate-500 text-sm font-medium">Total Collected</h3>
-                      <p className="text-3xl font-bold mt-1">₹{stats.totalPaid.toLocaleString()}</p>
+                      <p className="text-3xl font-bold mt-1">₹{(stats.totalPaid || 0).toLocaleString()}</p>
                     </div>
                     <div className="flex flex-col items-center text-slate-400 bg-slate-50 p-2 rounded-xl min-w-[60px]">
                       <Users size={18} className="mb-1" />
@@ -700,7 +779,7 @@ export default function App() {
                   <div className="flex justify-between items-end">
                     <div>
                       <h3 className="text-slate-500 text-sm font-medium">Pending Amount</h3>
-                      <p className="text-3xl font-bold mt-1">₹{stats.totalUnpaid.toLocaleString()}</p>
+                      <p className="text-3xl font-bold mt-1">₹{(stats.totalUnpaid || 0).toLocaleString()}</p>
                     </div>
                     <div className="flex flex-col items-center text-slate-400 bg-slate-50 p-2 rounded-xl min-w-[60px]">
                       <Users size={18} className="mb-1" />
@@ -724,7 +803,7 @@ export default function App() {
                       <div key={place.place} className="group">
                         <div className="flex justify-between text-sm mb-2">
                           <span className="font-semibold text-slate-700">{place.place}</span>
-                          <span className="text-slate-500">₹{place.paid.toLocaleString()} / ₹{place.total.toLocaleString()}</span>
+                          <span className="text-slate-500">₹{(place.paid || 0).toLocaleString()} / ₹{(place.total || 0).toLocaleString()}</span>
                         </div>
                         <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
                           <motion.div 
@@ -771,7 +850,9 @@ export default function App() {
                             </p>
                           </div>
                         </div>
-                        <p className="font-bold text-indigo-600">₹{payer.amount.toLocaleString()}</p>
+                        <div className="text-right">
+                          <p className="font-bold text-indigo-600">₹{(payer.target_amount || 0).toLocaleString()}</p>
+                        </div>
                       </div>
                     ))}
                     {stats.leaderboard.length === 0 && (
@@ -826,7 +907,7 @@ export default function App() {
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">#</th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Payer Details</th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Place</th>
-                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Amount</th>
+                        <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Paid / Target</th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider">Status</th>
                         <th className="px-6 py-4 text-xs font-bold text-slate-500 uppercase tracking-wider text-right">Actions</th>
                       </tr>
@@ -838,9 +919,11 @@ export default function App() {
                           <td className="px-6 py-4">
                             <div className="flex flex-col">
                               <span className="font-bold text-slate-800">{c.name}</span>
-                              <span className="text-xs text-slate-500 flex items-center gap-1 mt-1">
-                                <Phone size={12} /> {c.contact || 'N/A'}
-                              </span>
+                              {isAdmin && (
+                                <span className="text-xs text-slate-500 flex items-center gap-1 mt-1">
+                                  <Phone size={12} /> {c.contact || 'N/A'}
+                                </span>
+                              )}
                             </div>
                           </td>
                           <td className="px-6 py-4">
@@ -850,15 +933,26 @@ export default function App() {
                             </span>
                           </td>
                           <td className="px-6 py-4">
-                            <span className="font-bold text-slate-900">₹{c.amount.toLocaleString()}</span>
+                            <div className="flex flex-col">
+                              <span className="font-bold text-slate-900">₹{(c.amount || 0).toLocaleString()}</span>
+                              <span className="text-[10px] text-slate-400 font-medium">of ₹{(c.target_amount || 0).toLocaleString()}</span>
+                            </div>
                           </td>
                           <td className="px-6 py-4">
                             <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold ${
                               c.status === 'paid' 
                                 ? 'bg-emerald-50 text-emerald-700' 
-                                : 'bg-rose-50 text-rose-700'
+                                : c.status === 'partial'
+                                  ? 'bg-amber-50 text-amber-700'
+                                  : 'bg-rose-50 text-rose-700'
                             }`}>
-                              {c.status === 'paid' ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
+                              {c.status === 'paid' ? (
+                                <CheckCircle2 size={12} />
+                              ) : c.status === 'partial' ? (
+                                <TrendingUp size={12} />
+                              ) : (
+                                <XCircle size={12} />
+                              )}
                               {c.status.toUpperCase()}
                             </span>
                           </td>
@@ -897,15 +991,19 @@ export default function App() {
                           <span className="text-xs font-bold text-slate-300 mt-1">#{idx + 1}</span>
                           <div>
                             <p className="font-bold text-slate-800">{c.name}</p>
-                            <p className="text-xs text-slate-500 flex items-center gap-1 mt-0.5">
-                              <Phone size={10} /> {c.contact || 'N/A'}
-                            </p>
+                            {isAdmin && (
+                              <p className="text-xs text-slate-500 flex items-center gap-1 mt-0.5">
+                                <Phone size={10} /> {c.contact || 'N/A'}
+                              </p>
+                            )}
                           </div>
                         </div>
                         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
                           c.status === 'paid' 
                             ? 'bg-emerald-50 text-emerald-700' 
-                            : 'bg-rose-50 text-rose-700'
+                            : c.status === 'partial'
+                              ? 'bg-amber-50 text-amber-700'
+                              : 'bg-rose-50 text-rose-700'
                         }`}>
                           {c.status.toUpperCase()}
                         </span>
@@ -917,9 +1015,10 @@ export default function App() {
                           <span className="text-xs font-medium text-slate-600">{c.place}</span>
                         </div>
                         <div className="flex flex-col items-end">
-                          <span className="text-[10px] text-slate-400 uppercase font-bold">Amount</span>
+                          <span className="text-[10px] text-slate-400 uppercase font-bold">Paid / Target</span>
                           <div className="flex flex-col items-end">
-                            <span className="text-sm font-bold text-slate-900">₹{c.amount.toLocaleString()}</span>
+                            <span className="text-sm font-bold text-slate-900">₹{(c.amount || 0).toLocaleString()}</span>
+                            <span className="text-[10px] text-slate-400 font-medium">of ₹{(c.target_amount || 0).toLocaleString()}</span>
                           </div>
                         </div>
                       </div>
@@ -1028,62 +1127,108 @@ export default function App() {
                       />
                     </div>
                     <div className="space-y-2">
-                      <label className="text-sm font-bold text-slate-700 ml-1">Amount (₹)</label>
+                      <label className="text-sm font-bold text-slate-700 ml-1">Target Amount (₹)</label>
                       <input
                         required
                         type="number"
                         placeholder="0.00"
-                        value={formData.amount}
-                        onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                        value={formData.target_amount}
+                        onChange={(e) => setFormData({ ...formData, target_amount: e.target.value })}
                         className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
                       />
                     </div>
                   </div>
 
-                  <div className="space-y-2">
-                    <label className="text-sm font-bold text-slate-700 ml-1">Payment Status</label>
-                    <div className="grid grid-cols-2 gap-3">
-                      <button
-                        type="button"
-                        onClick={() => setFormData({ ...formData, status: 'paid' })}
-                        className={`flex items-center justify-center gap-2 py-3 rounded-xl border-2 transition-all font-bold text-sm ${
-                          formData.status === 'paid'
-                            ? 'bg-emerald-50 border-emerald-500 text-emerald-700'
-                            : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'
-                        }`}
-                      >
-                        <CheckCircle2 size={16} />
-                        Paid
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setFormData({ ...formData, status: 'unpaid' })}
-                        className={`flex items-center justify-center gap-2 py-3 rounded-xl border-2 transition-all font-bold text-sm ${
-                          formData.status === 'unpaid'
-                            ? 'bg-rose-50 border-rose-500 text-rose-700'
-                            : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'
-                        }`}
-                      >
-                        <XCircle size={16} />
-                        Unpaid
-                      </button>
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <label className="text-sm font-bold text-slate-700 ml-1">Payment Status</label>
+                      <div className="grid grid-cols-3 gap-3">
+                        <button
+                          type="button"
+                          onClick={() => setFormData({ ...formData, status: 'paid' })}
+                          className={`flex items-center justify-center gap-2 py-3 rounded-xl border-2 transition-all font-bold text-sm ${
+                            formData.status === 'paid'
+                              ? 'bg-emerald-50 border-emerald-500 text-emerald-700'
+                              : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'
+                          }`}
+                        >
+                          <CheckCircle2 size={16} />
+                          Paid
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFormData({ ...formData, status: 'partial' })}
+                          className={`flex items-center justify-center gap-2 py-3 rounded-xl border-2 transition-all font-bold text-sm ${
+                            formData.status === 'partial'
+                              ? 'bg-amber-50 border-amber-500 text-amber-700'
+                              : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'
+                          }`}
+                        >
+                          <TrendingUp size={16} />
+                          Partial
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setFormData({ ...formData, status: 'unpaid' })}
+                          className={`flex items-center justify-center gap-2 py-3 rounded-xl border-2 transition-all font-bold text-sm ${
+                            formData.status === 'unpaid'
+                              ? 'bg-rose-50 border-rose-500 text-rose-700'
+                              : 'bg-white border-slate-100 text-slate-400 hover:border-slate-200'
+                          }`}
+                        >
+                          <XCircle size={16} />
+                          Unpaid
+                        </button>
+                      </div>
                     </div>
+
+                    <AnimatePresence mode="wait">
+                      {formData.status === 'partial' && (
+                        <motion.div 
+                          key="partial-input"
+                          initial={{ opacity: 0, height: 0 }}
+                          animate={{ opacity: 1, height: 'auto' }}
+                          exit={{ opacity: 0, height: 0 }}
+                          className="space-y-2 overflow-hidden"
+                        >
+                          <label className="text-sm font-bold text-slate-700 ml-1">Partial Amount Received (₹)</label>
+                          <input
+                            required
+                            type="number"
+                            placeholder="0.00"
+                            value={formData.amount}
+                            onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all"
+                          />
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
 
                   <div className="pt-4 flex gap-4">
                     <button
                       type="submit"
-                      className="flex-1 bg-indigo-600 text-white py-4 rounded-2xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all flex items-center justify-center gap-2"
+                      disabled={saving}
+                      className="flex-1 bg-indigo-600 text-white py-4 rounded-2xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all flex items-center justify-center gap-2 disabled:opacity-70 disabled:cursor-not-allowed"
                     >
-                      {editingCollection ? 'Update' : 'Save Collection'}
-                      <ArrowRight size={18} />
+                      {saving ? (
+                        <>
+                          <Loader2 size={18} className="animate-spin" />
+                          Saving...
+                        </>
+                      ) : (
+                        <>
+                          {editingCollection ? 'Update' : 'Save Collection'}
+                          <ArrowRight size={18} />
+                        </>
+                      )}
                     </button>
                     {editingCollection && (
                       <button
                         type="button"
                         onClick={() => {
                           setEditingCollection(null);
-                          setFormData({ name: '', place: '', contact: '', amount: '', status: 'unpaid' });
+                          setFormData({ name: '', place: '', contact: '', target_amount: '', amount: '', status: 'unpaid' });
                           setView('list');
                         }}
                         className="px-6 py-4 bg-slate-100 text-slate-600 rounded-2xl font-bold hover:bg-slate-200 transition-all"

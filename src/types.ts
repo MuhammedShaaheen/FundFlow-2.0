@@ -3,8 +3,9 @@ export interface Collection {
   name: string;
   place: string;
   contact: string;
+  target_amount: number;
   amount: number;
-  status: 'paid' | 'unpaid';
+  status: 'paid' | 'unpaid' | 'partial';
   created_at: string;
 }
 
@@ -24,7 +25,8 @@ export interface Stats {
   leaderboard: {
     name: string;
     place: string;
+    target_amount: number;
     amount: number;
-    status: 'paid' | 'unpaid';
+    status: 'paid' | 'unpaid' | 'partial';
   }[];
 }
