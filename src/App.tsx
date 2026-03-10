@@ -58,6 +58,7 @@ export default function App() {
   });
   const [loading, setLoading] = useState(true);
   const [selectedPlace, setSelectedPlace] = useState<string>('All');
+  const [selectedStatus, setSelectedStatus] = useState<string>('All');
   const [editingCollection, setEditingCollection] = useState<Collection | null>(null);
   const [showImportModal, setShowImportModal] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -404,9 +405,11 @@ export default function App() {
   };
 
   const places = ['All', ...Array.from(new Set(collections.map(c => c.place)))];
-  const filteredCollections = selectedPlace === 'All' 
-    ? collections 
-    : collections.filter(c => c.place === selectedPlace);
+  const filteredCollections = collections.filter(c => {
+    const placeMatch = selectedPlace === 'All' || c.place === selectedPlace;
+    const statusMatch = selectedStatus === 'All' || c.status === selectedStatus;
+    return placeMatch && statusMatch;
+  });
 
   const handlePasswordSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -514,17 +517,17 @@ export default function App() {
       </header>
 
       {/* Mobile Bottom Nav */}
-      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 px-6 py-3 flex justify-between items-center shadow-[0_-4px_10px_rgba(0,0,0,0.05)]">
+      <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-slate-200 px-10 py-3 flex justify-around items-center shadow-[0_-4px_10px_rgba(0,0,0,0.05)]">
         <button 
           onClick={() => setView('dashboard')}
-          className={`flex flex-col items-center gap-1 ${view === 'dashboard' ? 'text-indigo-600' : 'text-slate-400'}`}
+          className={`flex flex-col items-center gap-1 min-w-[60px] ${view === 'dashboard' ? 'text-indigo-600' : 'text-slate-400'}`}
         >
           <LayoutDashboard size={20} />
           <span className="text-[10px] font-bold uppercase tracking-wider">Home</span>
         </button>
         <button 
           onClick={() => setView('list')}
-          className={`flex flex-col items-center gap-1 ${view === 'list' ? 'text-indigo-600' : 'text-slate-400'}`}
+          className={`flex flex-col items-center gap-1 min-w-[60px] ${view === 'list' ? 'text-indigo-600' : 'text-slate-400'}`}
         >
           <ListOrdered size={20} />
           <span className="text-[10px] font-bold uppercase tracking-wider">List</span>
@@ -532,7 +535,7 @@ export default function App() {
         {isAdmin && (
           <button 
             onClick={() => { setView('input'); setEditingCollection(null); }}
-            className={`flex flex-col items-center gap-1 ${view === 'input' ? 'text-indigo-600' : 'text-slate-400'}`}
+            className={`flex flex-col items-center gap-1 min-w-[60px] ${view === 'input' ? 'text-indigo-600' : 'text-slate-400'}`}
           >
             <PlusCircle size={20} />
             <span className="text-[10px] font-bold uppercase tracking-wider">Add</span>
@@ -729,6 +732,11 @@ export default function App() {
               exit={{ opacity: 0, y: -20 }}
               className="space-y-8"
             >
+              <div>
+                <h2 className="text-2xl font-bold text-slate-800">Overview Dashboard</h2>
+                <p className="text-slate-500 text-sm">Real-time collection statistics and insights</p>
+              </div>
+
               {/* Top Stats */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
@@ -800,9 +808,16 @@ export default function App() {
                   </div>
                   <div className="space-y-4">
                     {stats.placeStats.map((place) => (
-                      <div key={place.place} className="group">
+                      <button 
+                        key={place.place} 
+                        className="w-full text-left group"
+                        onClick={() => {
+                          setSelectedPlace(place.place);
+                          setView('list');
+                        }}
+                      >
                         <div className="flex justify-between text-sm mb-2">
-                          <span className="font-semibold text-slate-700">{place.place}</span>
+                          <span className="font-semibold text-slate-700 group-hover:text-indigo-600 transition-colors">{place.place}</span>
                           <span className="text-slate-500">₹{(place.paid || 0).toLocaleString()} / ₹{(place.total || 0).toLocaleString()}</span>
                         </div>
                         <div className="h-2 w-full bg-slate-100 rounded-full overflow-hidden">
@@ -812,7 +827,7 @@ export default function App() {
                             className="h-full bg-indigo-500 rounded-full"
                           />
                         </div>
-                      </div>
+                      </button>
                     ))}
                     {stats.placeStats.length === 0 && (
                       <p className="text-center py-10 text-slate-400 italic">No data available yet</p>
@@ -884,15 +899,29 @@ export default function App() {
                   )}
                 </div>
                 
-                <div className="flex items-center gap-3">
+                <div className="flex flex-wrap items-center gap-3">
                   <div className="relative">
                     <Filter className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                     <select 
                       value={selectedPlace}
                       onChange={(e) => setSelectedPlace(e.target.value)}
-                      className="pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none"
+                      className="pl-10 pr-8 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none"
                     >
                       {places.map(p => <option key={p} value={p}>{p}</option>)}
+                    </select>
+                  </div>
+
+                  <div className="relative">
+                    <CircleDollarSign className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <select 
+                      value={selectedStatus}
+                      onChange={(e) => setSelectedStatus(e.target.value)}
+                      className="pl-10 pr-8 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium focus:outline-none focus:ring-2 focus:ring-indigo-500 appearance-none"
+                    >
+                      <option value="All">All Status</option>
+                      <option value="paid">Paid</option>
+                      <option value="partial">Partial</option>
+                      <option value="unpaid">Unpaid</option>
                     </select>
                   </div>
                 </div>
