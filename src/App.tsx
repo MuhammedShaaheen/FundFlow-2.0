@@ -28,6 +28,8 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import * as XLSX from 'xlsx';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 import type { Collection, Stats } from './types';
 import { supabase } from './supabaseClient';
 
@@ -308,22 +310,130 @@ export default function App() {
     }
   };
 
-  const handleExportExcel = () => {
-    const dataToExport = filteredCollections.map((c, idx) => ({
-      '#': idx + 1,
-      'Name': c.name,
-      'Place': c.place,
-      'Contact': c.contact,
-      'Target Amount': c.target_amount,
-      'Paid Amount': c.amount,
-      'Status': c.status.toUpperCase(),
-      'Date': new Date(c.created_at).toLocaleDateString()
-    }));
+  const handleExportPDF = async () => {
+    try {
+      const doc = new jsPDF();
+      
+      // Fetch Noto Sans Malayalam font (supports both English and Malayalam)
+      let fontUrl = 'https://cdn.jsdelivr.net/gh/googlefonts/noto-fonts@master/hinted/ttf/NotoSansMalayalam/NotoSansMalayalam-Regular.ttf';
+      let response = await fetch(fontUrl);
+      
+      if (!response.ok) {
+        // Fallback to Anek Malayalam if Noto is unavailable
+        fontUrl = 'https://cdn.jsdelivr.net/gh/googlefonts/anek@main/fonts/ttf/AnekMalayalam-Regular.ttf';
+        response = await fetch(fontUrl);
+      }
 
-    const ws = XLSX.utils.json_to_sheet(dataToExport);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Collections");
-    XLSX.writeFile(wb, `Collections_Export_${new Date().toISOString().split('T')[0]}.xlsx`);
+      if (!response.ok) throw new Error('Failed to fetch any suitable Malayalam font');
+      
+      const arrayBuffer = await response.arrayBuffer();
+      
+      // Robust base64 conversion
+      const uint8Array = new Uint8Array(arrayBuffer);
+      let binary = '';
+      const len = uint8Array.byteLength;
+      for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(uint8Array[i]);
+      }
+      const base64Font = btoa(binary);
+
+      // Add the font to jsPDF
+      doc.addFileToVFS('MalayalamFont.ttf', base64Font);
+      doc.addFont('MalayalamFont.ttf', 'MalayalamFont', 'normal');
+      
+      const title = selectedPlace === 'All' ? 'All Collections' : `Collections - ${selectedPlace}`;
+      
+      // Calculate summary for the filtered data
+      const filteredTarget = filteredCollections.reduce((sum, c) => sum + parseNum(c.target_amount), 0);
+      const filteredPaid = filteredCollections.reduce((sum, c) => sum + parseNum(c.amount), 0);
+      const filteredUnpaid = filteredTarget - filteredPaid;
+
+      // --- HEADER SECTION (English - Helvetica) ---
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(20);
+      doc.setTextColor(79, 70, 229); // Indigo-600
+      doc.text(title, 14, 22);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.setTextColor(100, 116, 139); // Slate-500
+      doc.text(`Generated on: ${new Date().toLocaleString()}`, 14, 28);
+
+      doc.setDrawColor(226, 232, 240); // Slate-200
+      doc.line(14, 33, 196, 33);
+
+      // --- SUMMARY SECTION (English - Helvetica) ---
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(13);
+      doc.setTextColor(30, 41, 59); // Slate-800
+      doc.text('Collection Summary', 14, 42);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(10);
+      doc.text(`Total Target: RS ${(filteredTarget || 0).toLocaleString()}`, 14, 50);
+      doc.text(`Total Collected: RS ${(filteredPaid || 0).toLocaleString()}`, 14, 57);
+      doc.text(`Pending Amount: RS ${(filteredUnpaid || 0).toLocaleString()}`, 14, 64);
+
+      // --- TABLE SECTION ---
+      const tableData = filteredCollections.map((c, idx) => [
+        String(idx + 1),
+        c.name || '',
+        c.place || '',
+        c.contact || 'N/A',
+        `RS ${(c.target_amount || 0).toLocaleString()}`,
+        `RS ${(c.amount || 0).toLocaleString()}`,
+        (c.status || '').toUpperCase()
+      ]);
+
+      // Helper to detect Malayalam characters
+      const hasMalayalam = (text: string) => /[\u0D00-\u0D7F]/.test(text);
+
+      autoTable(doc, {
+        startY: 75,
+        head: [['S.No', 'Name', 'Place', 'Contact', 'Target Amount', 'Amount Paid', 'Status']],
+        body: tableData,
+        headStyles: { 
+          fillColor: [79, 70, 229], 
+          textColor: [255, 255, 255], 
+          font: 'helvetica',
+          fontStyle: 'bold',
+          fontSize: 10
+        },
+        bodyStyles: {
+          fontSize: 9,
+          textColor: [30, 41, 59]
+        },
+        alternateRowStyles: { 
+          fillColor: [248, 250, 252] 
+        },
+        margin: { left: 14, right: 14 },
+        styles: { 
+          cellPadding: 3,
+          valign: 'middle'
+        },
+        // SMART FONT SWITCHING:
+        // Use Helvetica for English/Numbers to ensure they ALWAYS show up.
+        // Use MalayalamFont ONLY if Malayalam characters are detected.
+        didParseCell: (data) => {
+          const cellText = String(data.cell.raw || '');
+          if (data.section === 'head') {
+            data.cell.styles.font = 'helvetica';
+            data.cell.styles.fontStyle = 'bold';
+          } else {
+            if (hasMalayalam(cellText)) {
+              data.cell.styles.font = 'MalayalamFont';
+            } else {
+              data.cell.styles.font = 'helvetica';
+            }
+          }
+        }
+      });
+
+      doc.save(`${title.replace(/\s+/g, '_')}_${new Date().toISOString().split('T')[0]}.pdf`);
+    } catch (error) {
+      console.error('Error generating PDF:', error);
+      alert('Failed to generate PDF. Please ensure you have a stable internet connection.');
+    }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -890,11 +1000,11 @@ export default function App() {
                   <h2 className="text-2xl font-bold text-slate-800">Collections List</h2>
                   {isAdmin && (
                     <button
-                      onClick={handleExportExcel}
-                      className="flex items-center gap-2 px-3 py-1.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-all font-bold text-xs shadow-sm shadow-emerald-200"
+                      onClick={handleExportPDF}
+                      className="flex items-center gap-2 px-3 py-1.5 bg-rose-600 text-white rounded-lg hover:bg-rose-700 transition-all font-bold text-xs shadow-sm shadow-rose-200"
                     >
                       <FileSpreadsheet size={14} />
-                      Export Excel
+                      Export PDF
                     </button>
                   )}
                 </div>
